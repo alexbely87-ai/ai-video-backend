@@ -1,0 +1,61 @@
+import os
+import requests
+from flask import Flask, request, jsonify, send_from_directory
+from lumaai import LumaAI
+
+app = Flask(__name__)
+
+LUMA_API_KEY = os.environ.get("LUMA_API_KEY")
+client = LumaAI(auth_token=LUMA_API_KEY)
+
+VIDEO_STORAGE = "/app/videos"
+os.makedirs(VIDEO_STORAGE, exist_ok=True)
+
+@app.route('/create-video', methods=['POST'])
+def create_video():
+    data = request.json
+    prompt = data.get('prompt')
+    if not prompt:
+        return jsonify({"error": "Prompt is required"}), 400
+    try:
+        generation = client.generations.create(
+            prompt=prompt,
+            model="ray-flash-2",
+            resolution="720p",
+            duration="5s"
+        )
+        return jsonify({"task_id": generation.id}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/status/<task_id>', methods=['GET'])
+def get_status(task_id):
+    try:
+        generation = client.generations.get(id=task_id)
+        if generation.state == "completed":
+            video_url = generation.assets.video
+            local_filename = f"{task_id}.mp4"
+            local_path = os.path.join(VIDEO_STORAGE, local_filename)
+            if not os.path.exists(local_path):
+                response = requests.get(video_url, stream=True, timeout=60)
+                response.raise_for_status()
+                with open(local_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            return jsonify({
+                "state": "completed",
+                "video_url": f"{request.host_url}videos/{local_filename}"
+            }), 200
+        elif generation.state == "failed":
+            return jsonify({"state": "failed", "error": "Unknown error"}), 200
+        else:
+            return jsonify({"state": generation.state}), 200
+    except Exception as e:
+        return jsonify({"state": "error", "error": str(e)}), 500
+
+@app.route('/videos/<filename>')
+def serve_video(filename):
+    return send_from_directory(VIDEO_STORAGE, filename)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
